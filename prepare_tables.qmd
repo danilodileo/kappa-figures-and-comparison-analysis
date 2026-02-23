@@ -1,0 +1,265 @@
+---
+title: "PhD thesis - Method comparison"
+subtitle: "Prepare tables"
+author: "[Danilo Di Leo](https://github.com/danilodileo)"
+date: today
+format:
+  html:
+    toc: true
+    toc-title: "Table of Contents"
+    toc-depth: 2
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    code-summary: "Show Code"
+    fig-width: 6
+    fig-height: 4
+    highlight-style: github
+    self-contained: true  
+editor: visual
+bibliography:
+  - grateful-refs.bib
+---
+
+```{r libraries}
+#| label: libraries
+#| message: false
+#| cache: false
+#| include: false
+#| warning: false
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(purrr)
+library(stringr)
+library(ggplot2)
+library(ggrepel)
+library(kfigr)
+library(knitr)
+library(DT)
+library(grateful)
+library(patchwork)
+library(broom)
+library(gt)
+library(tibble)
+library(corrr)
+library(forcats)
+library(shiny)
+library(grid)
+library(ggvenn)
+library(vegan)
+library(reshape2)
+library(ggsignif)
+library(readxl)
+library(ggcorrplot)
+library(FactoMineR)
+library(factoextra)
+library(missMDA)
+library(kableExtra) # For tables
+library(compositions) # For CLR transformation
+library(pheatmap)
+library(gridExtra)
+library(tidytext)  # per reorder_within() e scale_x_reordered()
+library(shadowtext)
+library(gt)
+library(reactable)
+
+```
+
+```{r palette-constants}
+# Set COG categories long names
+cog_mapping <- c(
+   'A' = 'RNA_process',
+   'B' = 'Chromatin_Struc',
+   'C' = 'Energy_prod',
+   'D' = 'Cell_cycle',
+   'E' = 'AA_metab',
+   'F' = 'Nucl_metab',
+   'G' = 'Carbohy_metab',
+   'H' = 'Coenz_metab',
+   'I' = 'Lipid_metab',
+   'J' = 'Tranlsation',
+   'K' = 'Transcription',
+   'L' = 'Replication',
+   'M' = 'Cell_wall',
+   'N' = 'Cell_motility',
+   'O' = 'Post-transl_mod',
+   'P' = 'Inorg_ion_transp',
+   'Q' = 'Sec_Structure',
+  'T' = 'Signal_Transduc',
+  'U' = 'Intracel_traf',
+  'V' = 'Defense mechanisms',
+  'W' = 'Extracellular structures',
+  'Y' = 'Nucl_structure',
+  'Z' = 'Cytoskeleton',
+  'R' = 'Func_unknown',
+  'S' = 'Func_unknown',
+  '-' = 'Func_unknown'
+ )
+```
+
+## Formatting Count tables
+
+```{r count-table}
+
+# metatdenovo - read counts table and format them
+metatdenovo.counts <- read_tsv(
+    'metatdenovo/summary_tables/megahit.prokka.counts.tsv.gz',
+    col_types = cols(
+      .default = col_double(), orf = col_character(), chr = col_character(),
+      sample = col_character(), strand = col_character()
+      )
+    ) %>%
+    select( -start, -end, -chr, -strand) %>%
+    mutate(method = 'metatdenovo')
+
+# magmap - read counts table and format them
+magmap.counts <-read_tsv(
+    'magmap/summary_tables/magmap.CDS.counts.tsv.gz',
+    col_types = cols(
+      .default = col_double(), orf = col_character(), chr = col_character(),
+      sample = col_character(), strand = col_character()
+      )
+    ) %>%
+    select( -start, -end, -chr, -strand) %>%
+    mutate(method = 'magmap') %>%
+    left_join(
+      read_tsv(
+        'magmap/summary_tables/magmap.genomes2orfs.tsv.gz', # load genome index for taxonomy annotation
+        show_col_types = FALSE
+    ),
+    by = "orf"
+    )
+
+```
+
+## Add taxonomy
+
+```{r add-taxonomy-to-count-table}
+
+# magmap - read and format ncbi taxonomy table
+magmap.taxonomy <- read_tsv('magmap/summary_tables/magmap.genome_metadata.tsv.gz',
+         show_col_types = FALSE
+         ) %>%
+  select(accno, gtdb_taxonomy) %>%
+  separate(
+    gtdb_taxonomy,
+    into = c("domain", "phylum", "class", "order", "family", "genus", "species"),
+    sep = ";",
+    fill = "right"
+  ) %>%
+  mutate(across(
+    everything(),
+    ~ str_remove(., "^[a-z]__") %>% na_if("") %>% replace_na("unclassified")
+  )) %>%
+  filter(!str_detect(accno, 'metaba*'),
+         !str_detect(accno, 'conco*')) %>%
+  mutate( method = 'magmap')
+
+# metatdenovo - read and format ncbi taxonomy table
+metatdenovo.taxonomy <- read_tsv('metatdenovo/summary_tables/megahit.prokka.gtdb-r220.diamond.taxonomy.tsv.gz',
+                                 show_col_types = FALSE
+                                 ) %>%
+  select(-taxid,-evalue,-taxonomy,-strain) %>%
+  mutate( method = 'metatdenovo')
+```
+
+## Merge counts and taxonomy together
+
+```{r merge-counts-tax }
+
+# merge metatdenovo counts and taxonomy
+metatdenovo.counts.tax <- metatdenovo.counts %>%
+  left_join(metatdenovo.taxonomy, join_by(orf, method),
+            relationship = "many-to-many")
+
+# merge magmap counts and taxonomy
+magmap.counts.tax <- magmap.counts %>%
+  left_join(magmap.taxonomy, join_by(accno, method),
+            relationship = "many-to-many")
+
+# merge the two dataset together
+counts.tax <- bind_rows(metatdenovo.counts.tax, magmap.counts.tax)
+
+write_tsv(counts.tax,'counts-taxonomy.tsv.gz')
+```
+
+## Add function
+
+### Eggnog mapper tables
+
+```{r read-eggnogs}
+#| label: read-eggnogs
+#| cache-lazy: false
+#| warning: false
+
+metatdenovo.eggnogs <- Sys.glob('metatdenovo/summary_tables/*.emapper.tsv.gz') %>%
+  str_subset('top3', negate = TRUE) %>%
+  read_tsv(id = 'fname', show_col_types = FALSE) %>%
+  mutate(
+    project = str_replace(fname, 'nextflow\\/([^/]+)\\/.*', '\\1'),
+    run     = str_remove(fname, 'nextflow\\/[^/]+\\/') %>% str_remove('\\/.*')
+  ) %>%
+  select(-fname) %>%
+  separate(run, c('assembler', 'orf_caller', 'bbnorm', 'minlen'), remove = FALSE, sep = '\\.', fill = 'right') %>%
+  mutate(minlen = ifelse(is.na(minlen), 0, str_remove(minlen, 'minlen') %>% as.integer())) %>%
+  mutate(assembly = sprintf("%s%s%s", assembler, ifelse(bbnorm == 'with_bbnorm', '*', ''), ifelse(minlen > 0, '†', ''))) %>%
+  rename_with(str_to_lower) %>%
+  rename(method = 'run') %>%
+  select(-project, -assembly, -assembler, -orf_caller,-bbnorm)
+
+
+# spot which files have different number of columns
+files <- Sys.glob('magmap/summary_tables/magmap.eggnog_annotations/*')
+
+# # Function to count columns in each file
+count_columns <- function(file) {
+  num_cols <- read_tsv(file, comment = "##", show_col_types = FALSE) %>%
+  ncol()
+  tibble(file = file, num_cols = num_cols)
+}
+
+# # Apply the function to each file and collect the results
+file_column_counts <- map_dfr(files, count_columns)
+ 
+# Pull files with 21 columns
+file.with.21.columns <- file_column_counts %>%
+filter( num_cols == 21) %>%
+select(-num_cols) %>%
+pull(file)
+
+ 
+# Pull files with 24 columns
+file.with.24.columns <- file_column_counts %>%
+ filter( num_cols == 24) %>%
+ select(-num_cols) %>%
+ pull(file)
+
+magmap.eggnog <-  rbind(
+  file.with.24.columns %>% # load all annotated ORFs
+    read_tsv(id = 'fname', comment = "##", show_col_types = FALSE) %>%
+    rename_with(~ tolower(sub("^#", "", .)))  %>%
+    rename( orf = 'query',
+          max_annot_lvl = 'best_og_name',
+          cog_category = 'best_og_cat',
+          description = 'best_og_desc') %>%
+    mutate( project = 'gtdb') %>%
+    select(-fname, -narr_og_name, -narr_og_cat, -narr_og_desc),
+  file.with.21.columns %>%
+    read_tsv(id = 'fname', comment = "##", show_col_types = FALSE) %>%
+    rename_with(~ tolower(sub("^#", "", .)))  %>%
+    rename( orf = 'query') %>%
+    mutate( project = 'gtdb') %>%
+    select(-fname))
+
+eggnogs <- bind_rows(magmap.eggnog %>%
+  select(orf, cog_category) %>%
+    mutate(method = 'magmap'),
+  metatdenovo.eggnogs %>%
+    select(orf, cog_category, method))
+
+# write_tsv(eggnogs, 'full_eggnog_table.tsv.gz')
+
+```

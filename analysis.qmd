@@ -1,0 +1,815 @@
+---
+title: "PhD thesis - method comparison"
+subtitle: analysis
+author: "[Danilo Di Leo](https://github.com/danilodileo)"
+date: today
+format:
+  html:
+    toc: true
+    toc-title: "Table of Contents"
+    toc-depth: 2
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    code-summary: "Show Code"
+    fig-width: 6
+    fig-height: 4
+    highlight-style: github
+    self-contained: true  
+editor: visual
+---
+
+## Data preparation and library
+
+```{r setup}
+#| label: setup
+#| echo: false
+#| cache: true
+
+knitr::opts_chunk$set(echo = TRUE, fig.path='figures/', cache = TRUE, fig.width = 10)
+ggplot2::theme_set(ggplot2::theme_bw())
+```
+
+```{r libraries}
+#| label: libraries
+#| message: false
+#| echo: false
+#| cache: false
+#| include: false
+#| warning: false
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(purrr)
+library(stringr)
+library(ggplot2)
+library(ggrepel)
+library(kfigr)
+library(knitr)
+library(DT)
+library(grateful)
+library(patchwork)
+library(broom)
+library(gt)
+library(tibble)
+library(corrr)
+library(forcats)
+library(shiny)
+library(grid)
+library(ggvenn)
+library(vegan)
+library(reshape2)
+library(ggsignif)
+library(readxl)
+library(ggcorrplot)
+library(FactoMineR)
+library(factoextra)
+library(missMDA)
+library(kableExtra) # For tables
+library(compositions) # For CLR transformation
+library(pheatmap)
+library(gridExtra)
+library(tidytext)  # per reorder_within() e scale_x_reordered()
+library(shadowtext)
+library(gt)
+library(reactable)
+library(plotly)
+library(ComplexHeatmap)
+library(circlize)
+library(ggvenn)
+library(ineq)
+library(ggpmisc)
+```
+
+```{r palette-and-constants}
+#| echo: false
+
+# Colourblind palette
+cb_palette <- c(
+  "#332288", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77",
+  "#CCBB44", "#E69F00", "#CC6677", "#882255", "#AA4499", "#BBBBBB"
+)
+
+# Set COG categories long names
+cog_mapping <- c(
+   'A' = 'RNA_process',
+   'B' = 'Chromatin_Struc',
+   'C' = 'Energy_prod',
+   'D' = 'Cell_cycle',
+   'E' = 'AA_metab',
+   'F' = 'Nucl_metab',
+   'G' = 'Carbohy_metab',
+   'H' = 'Coenz_metab',
+   'I' = 'Lipid_metab',
+   'J' = 'Tranlsation',
+   'K' = 'Transcription',
+   'L' = 'Replication',
+   'M' = 'Cell_wall',
+   'N' = 'Cell_motility',
+   'O' = 'Post-transl_mod',
+   'P' = 'Inorg_ion_transp',
+   'Q' = 'Sec_Structure',
+  'T' = 'Signal_Transduc',
+  'U' = 'Intracel_traf',
+  'Y' = 'Nucl_structure',
+  'Z' = 'Cytoskeleton',
+  'R' = 'Gen_Func',
+  'V' = 'Defense_mechanisms',
+  'W' = 'Extracellular_structures',
+  'S' = 'Func_unknown',
+  '-' = 'Func_unknown'
+ )
+```
+
+```{r read-data-execution-traces}
+#| label: execution-traces
+#| cache-lazy: false
+#| echo: false
+#| warning: false
+#| fig-height: 8
+#| fig-width: 12
+
+# Code adapted from Di Leo et al., 2025
+# extraces for metatdenovo
+metatdenovo.extraces <- Sys.glob('metatdenovo/pipeline_info/execution_trace_2025-03-11_20-43-36.txt') %>%
+  read_tsv(show_col_types = FALSE, id = 'fname') %>%
+  mutate(
+    method     = 'metatdenovo',
+    p       = str_remove(name, 'NFCORE_METATDENOVO:METATDENOVO:'),
+    process = str_remove(p, ' .*'),
+    sample  = str_replace(p, '.*\\((.*)\\)', '\\1'),
+    durationc  = str_remove(duration, ' *\\d+ms') %>%
+      ifelse(str_detect(., '\\dh'), ., str_c('0h', ., sep = ' ')) %>%
+      ifelse(str_detect(., '\\dm'), ., str_c('0m', ., sep = ' ')) %>%
+      ifelse(str_detect(., '\\ds'), ., str_c(., '0s', sep = ' ')) %>%
+      hms(),
+    realtimec  = str_remove(realtime, ' *\\d+ms') %>%
+      ifelse(str_detect(., '\\dh'), ., str_c('0h', ., sep = ' ')) %>%
+      ifelse(str_detect(., '\\dm'), ., str_c('0m', ., sep = ' ')) %>%
+      ifelse(str_detect(., '\\ds'), ., str_c(., '0s', sep = ' ')) %>%
+      hms(),
+    num_cpus   = ( str_remove(`%cpu`, '%') %>%
+      as.double()/100 ) %>%
+      ceiling(),
+    peak_rssc = case_when(
+      str_detect(peak_rss, 'GB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^3,
+      str_detect(peak_rss, 'MB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^2,
+      str_detect(peak_rss, 'KB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^1,
+      str_detect(peak_rss, 'B')  ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^0,
+      TRUE                       ~ 0
+    ),
+    peak_vmemc = case_when(
+      str_detect(peak_vmem, 'GB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^3,
+      str_detect(peak_vmem, 'MB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^2,
+      str_detect(peak_vmem, 'KB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^1,
+      str_detect(peak_vmem, 'B')  ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^0,
+      TRUE                       ~ 0
+    ),
+    rcharc = case_when(
+      str_detect(rchar, 'GB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^3,
+      str_detect(rchar, 'MB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^2,
+      str_detect(rchar, 'KB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^1,
+      str_detect(rchar, 'B')  ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^0,
+      TRUE                       ~ 0
+    ),
+    wcharc = case_when(
+      str_detect(wchar, 'GB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^3,
+      str_detect(wchar, 'MB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^2,
+      str_detect(wchar, 'KB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^1,
+      str_detect(wchar, 'B')  ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^0,
+      TRUE                       ~ 0
+    )
+  ) %>%
+  select(
+    -p, -fname, -name, -task_id, -hash,
+    -native_id, -status, -exit, -submit) %>%
+  relocate(method, process, sample) %>%
+  mutate(process = str_remove(process, 'PROKKA_SUBSETS:'),
+         process = str_remove(process, 'BAM_SORT_STATS_SAMTOOLS:'),
+         process = str_remove(process, 'BAM_SORT_STATS_SAMTOOLS:BAM_STATS_SAMTOOLS:'),
+         process = str_remove(process, 'FORMAT_DIAMOND_'),
+         process = str_remove(process, 'BAM_STATS_SAMTOOLS:'),
+         process = str_replace(process, 'FASTQC_TRIMGALORE:FASTQC', 'FASTQC_TR'),
+         process = str_remove(process, 'FASTQC_TRIMGALORE:'),
+         process = str_replace(process, 'FEATURECOUNTS_CDS', 'FEATURECOUNTS'))
+
+# Extraces for magmap
+magmap.extraces <- Sys.glob('magmap/pipeline_info/execution_trace_2025-11-19_12-50-28.txt') %>%
+  read_tsv(show_col_types = FALSE, id = 'fname') %>%
+  mutate(
+    method     = 'magmap',
+    p       = str_remove(name, 'NFCORE_MAGMAP:MAGMAP:'),
+    process = str_remove(p, ' .*'),
+    sample  = str_replace(p, '.*\\((.*)\\)', '\\1'),
+    durationc  = str_remove(duration, ' *\\d+ms') %>%
+      ifelse(str_detect(., '\\dh'), ., str_c('0h', ., sep = ' ')) %>%
+      ifelse(str_detect(., '\\dm'), ., str_c('0m', ., sep = ' ')) %>%
+      ifelse(str_detect(., '\\ds'), ., str_c(., '0s', sep = ' ')) %>%
+      hms(),
+    realtimec  = str_remove(realtime, ' *\\d+ms') %>%
+      ifelse(str_detect(., '\\dh'), ., str_c('0h', ., sep = ' ')) %>%
+      ifelse(str_detect(., '\\dm'), ., str_c('0m', ., sep = ' ')) %>%
+      ifelse(str_detect(., '\\ds'), ., str_c(., '0s', sep = ' ')) %>%
+      hms(),
+    num_cpus   = ( str_remove(`%cpu`, '%') %>%
+      as.double()/100 ) %>%
+      ceiling(),
+    peak_rssc = case_when(
+      str_detect(peak_rss, 'GB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^3,
+      str_detect(peak_rss, 'MB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^2,
+      str_detect(peak_rss, 'KB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^1,
+      str_detect(peak_rss, 'B')  ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^0,
+      TRUE                       ~ 0
+    ),
+    peak_vmemc = case_when(
+      str_detect(peak_vmem, 'GB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^3,
+      str_detect(peak_vmem, 'MB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^2,
+      str_detect(peak_vmem, 'KB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^1,
+      str_detect(peak_vmem, 'B')  ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^0,
+      TRUE                       ~ 0
+    ),
+    rcharc = case_when(
+      str_detect(rchar, 'GB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^3,
+      str_detect(rchar, 'MB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^2,
+      str_detect(rchar, 'KB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^1,
+      str_detect(rchar, 'B')  ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^0,
+      TRUE                       ~ 0
+    ),
+    wcharc = case_when(
+      str_detect(wchar, 'GB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^3,
+      str_detect(wchar, 'MB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^2,
+      str_detect(wchar, 'KB') ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^1,
+      str_detect(wchar, 'B')  ~ str_remove(peak_rss, ' .*') %>% as.numeric() * 1024^0,
+      TRUE                       ~ 0
+    )
+  ) %>%
+  select(
+    -p, -fname, -name, -task_id, -hash,
+    -native_id, -status, -exit, -submit) %>%
+  relocate(method, process, sample) %>%
+  mutate(process = str_remove(process, 'PROKKA_SUBSETS:'),
+         process = str_remove(process, 'BAM_SORT_STATS_SAMTOOLS:'),
+         process = str_remove(process, 'BAM_SORT_STATS_SAMTOOLS:BAM_STATS_SAMTOOLS:'),
+         process = str_remove(process, 'SOURMASH:'),
+         process = str_remove(process, 'BAM_STATS_SAMTOOLS:'),
+         process = str_replace(process, 'FEATURECOUNTS_CDS', 'FEATURECOUNTS'),
+         process = str_replace(process, 'FASTQC_TRIMGALORE:FASTQC', 'FASTQC_TR'),
+         process = str_remove(process, 'FASTQC_TRIMGALORE:'),
+         process = str_remove(process, 'CONCATENATE_GFFS:'),
+         process = str_remove(process, 'CREATE_BBMAP_INDEX:'),
+         process = str_remove(process, 'CAT_GFFS:'))
+
+# Bind the two extraces
+extraces <- bind_rows(magmap.extraces, metatdenovo.extraces)
+```
+
+```{r read-process-groups}
+#| label: read-process-groups
+#| echo: false
+#| warning: false
+process_groups <- read_tsv('data/process_groups.txt', show_col_types = FALSE) %>%
+  select(process, process_group) %>%
+  mutate(process_group = factor(process_group))
+```
+
+```{r read-data-stats, cache.lazy=FALSE}
+#| label: read-data
+#| echo: false
+#| warning: false
+# load stats
+stats <- bind_rows(
+  read_tsv(
+    'magmap/summary_tables/magmap.overall_stats.tsv.gz',
+    col_types = cols(
+      .default = col_double(), sample = col_character()
+      )
+    ) %>%
+    mutate( method = 'magmap',
+            taxonomy = CDS,
+            mapped = idxs_n_mapped+tRNA+tmRNA+rRNA) %>%
+    group_by(sample) %>%
+    select(-tRNA, -tmRNA, -rRNA,-idxs_n_unmapped, -idxs_n_mapped),
+  read_tsv(
+    'metatdenovo/summary_tables/megahit.prokka.overall_stats.tsv.gz',
+    col_types = cols(
+      .default = col_double(), sample = col_character()
+      )
+    ) %>%
+    mutate( method = 'metatdenovo') %>%
+    rename( 
+            CDS = 'n_feature_count',
+            taxonomy = 'diamondtax_gtdb-r220',
+            mapped = 'idxs_n_mapped') %>%
+    select(-'diamondtax_ncbi-refseq-20240115', -n_trimmed, -idxs_n_unmapped)
+  ) %>%
+  mutate( perc_map = (mapped/n_non_contaminated)*100,
+          perc_ass_to_orf = (CDS/n_non_contaminated)*100)
+
+
+# read counts table
+counts.tax <- read_tsv('counts-taxonomy.tsv.gz', show_col_types = FALSE)
+# Read eggnog table
+eggnogs <- read_tsv('full_eggnog_table.tsv.gz', show_col_types = FALSE)
+```
+
+```{r cog-tables}
+#| include: false
+#| warning: false
+#| echo: false
+# Merge cunts and function tables
+counts <- counts.tax %>%
+  left_join(eggnogs, join_by(orf, method))
+
+# cog for all dataset
+cog.counts <- counts %>%
+  mutate(cog_category = str_to_upper(cog_category)) %>%
+  mutate(cog_category = str_replace_all(cog_category, " ", "")) %>%
+  separate_rows(cog_category, sep = "/") %>%     # M / U -> M , U
+  separate_rows(cog_category, sep = "") %>%      # DZ -> D , Z
+  mutate(cog_category = dplyr::recode(cog_category, !!!cog_mapping))
+```
+
+```{r tbl-cite-packages}
+#| label: tbl-cite-packages
+#| cache: false
+#| tbl-cap: Versions of R and packages used in this analysis.
+#| echo: false
+#| warning: false
+
+cite_packages(output = "table", pkgs = "Session", out.dir = getwd()) %>%
+  kable()
+```
+
+## Content of this report
+
+1.  Pipeline main stats
+    1.  General computing stats
+        -   Wall-clock time
+        -   CPU hours
+        -   peak RAM
+    2.  Read-level metrics
+        -   Total reads input, reads retained after QC.
+        -   \% mapped (per-sample): to assemblies (assembly+map) vs to reference mix (mapping pipeline).
+        -   Predicted ORFs / genes recovered (counts, length distributions).
+2.  Taxonomic comparison
+3.  Functional comparison
+4.  Differential gene expression (DEG) comparison
+
+## Pipeline main stats
+
+### General computing stats
+
+```{r fig-extraces}
+#| label: fig-extraces
+#| fig-height: 5
+#| fig-cap: '**CPU consumption, assembly memory usage and size.** A) Realtime cpu use per task type and pipeline execution, B) peak virtual memory usage and C) assembly size per assembly.'
+
+p0 <- extraces %>%
+  left_join(process_groups, by = join_by(process)) %>%
+  group_by(process_group, method) %>%
+  summarise(realtimec = sum(realtimec * num_cpus), .groups = 'drop') %>%
+  filter(!is.na(process_group)) %>%
+  ggplot(aes(x = factor(method, levels = c('metatdenovo','magmap')), y = realtimec, fill = process_group)) +
+  geom_col() +
+  scale_fill_brewer('Process group', palette = 'Paired') +
+  xlab('') + ylab('Seconds') +
+  coord_flip() +
+  theme(
+    panel.border       = element_rect(fill = NA, colour = "black", linewidth = 0.8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_blank(),
+
+    #–– X-axis label styling ––
+    axis.text.x        = element_text(size = 12),
+    axis.text.y        = element_text(size = 12),
+    axis.title.x       = element_blank(),
+    axis.ticks.x       = element_blank(),
+    axis.line.x        = element_line(colour = "black", linewidth = 0.7),
+    title = element_text(size = 13, face = "bold"),
+
+    # facet strips styled like your example
+    strip.background   = element_rect(fill = "white", colour = "black"),
+    strip.text         = element_text(size = 12),
+
+    legend.position    = "right"
+  ) +
+  labs(
+  title = 'Total CPU time consumed per pipeline')
+
+# calculate peak_rss
+convert_to_gb <- function(x) {
+  numeric <- as.numeric(str_extract(x, "[0-9.]+"))
+  unit    <- str_extract(x, "[A-Za-z]+")
+  
+  case_when(
+    unit %in% c("GB", "Gb", "gb") ~ numeric,
+    unit %in% c("MB", "Mb", "mb") ~ numeric / 1024,
+    unit %in% c("KB", "Kb", "kb") ~ numeric / (1024^2),
+    TRUE ~ NA_real_
+  )
+}
+
+extraces <- extraces %>%
+  mutate(peak_rss_gb = convert_to_gb(peak_rss))
+
+p1 <- extraces %>%
+  left_join(process_groups, by = join_by(process)) %>%
+  group_by(method) %>%
+  # summarise( mean_rss = mean(peak_rss_gb),
+  #            sd_rss = sd(peak_rss_gb)) %>%
+  #filter(peak_rss_gb == max(peak_rss_gb)) %>%
+  ungroup() %>%
+  distinct() %>%
+  ggplot(aes(x = factor(method, levels = c('metatdenovo','magmap')), y = peak_rss_gb, colour = method)) +
+  geom_point(size = 3) +
+  # geom_errorbar(aes(
+      # ymin = mean_rss - sd_rss,
+      # ymax = mean_rss + sd_rss
+  # ),
+  # width = 0.15,       # width of the horizontal bar
+  # linewidth = 0.7
+  # ) +
+  scale_colour_discrete('') +
+  xlab('') +
+  #ylim(0,10) +
+  ylab('RAM (GB)') +
+  coord_flip() +
+  theme(
+    panel.border       = element_rect(fill = NA, colour = "black", linewidth = 0.8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_line(colour = "white", linewidth = 0.6),
+    title = element_text(size = 13, face = "bold"),
+
+    #–– X-axis label styling ––
+    axis.text.x        = element_text(size = 12),
+    axis.text.y        = element_text(size = 12),
+    axis.title.x       = element_blank(),
+    axis.ticks.x       = element_blank(),
+    axis.line.x        = element_line(colour = "black", linewidth = 0.7),
+
+    # facet strips styled like your example
+    strip.background   = element_rect(fill = "white", colour = "black"),
+    strip.text         = element_text(size = 12),
+
+    legend.position    = "right"
+  ) +
+  labs(
+    title = "RAM used by the two pipelines"
+  )
+```
+
+### Read-level metrics
+
+```{r table-methods-performances }
+#| echo: false
+#| warning: false
+
+stats %>%
+  select(sample, perc_map, perc_ass_to_orf, method) %>%
+  pivot_longer(
+    cols = c(perc_map, perc_ass_to_orf),
+    names_to = "rate_measurement",
+    values_to = "value"
+  ) %>%
+  pivot_wider(
+    names_from = sample,
+    values_from = value
+  ) %>%
+  gt()
+```
+
+```{r methods-performances }
+#| warning: false
+#| echo: false
+
+# find average of mapping rate and cds rate
+means <- stats %>%
+  group_by(method) %>%
+  summarise(
+    mapping_rate = mean(perc_map, na.rm = TRUE),
+    cds_rate = mean(perc_ass_to_orf, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(mapping_rate, cds_rate), names_to = "rate", values_to = "mean_val")
+
+p2 <- stats %>%
+  select(sample, perc_map, perc_ass_to_orf, method) %>%
+  pivot_longer(cols = c(perc_map, perc_ass_to_orf), 
+               names_to = 'rate', values_to = 'perc') %>%
+  ggplot(aes(x=sample, y = perc, fill = rate)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_hline(data = means, aes(yintercept = mean_val, color = rate),
+             linetype = "dashed", linewidth = 0.8, show.legend = FALSE) +
+  theme(
+    panel.border       = element_rect(fill = NA, colour = "black", linewidth = 0.8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_line(colour = "white", linewidth = 0.6),
+
+    #–– X-axis label styling ––
+    axis.text.x        = element_text(size = 12),
+    axis.text.y        = element_text(size = 12),
+    axis.title.x       = element_blank(),
+    axis.title.y       = element_text(size = 13),
+    axis.ticks.x       = element_blank(),
+    axis.line.x        = element_line(colour = "black", linewidth = 0.7),
+    title = element_text(size = 14, face = "bold"),
+
+    # facet strips styled like your example
+    strip.background   = element_rect(fill = "white", colour = "black"),
+    strip.text         = element_text(size = 12),
+
+    legend.position    = "right"
+  ) +
+  scale_fill_manual(
+    values = c(perc_map = "#1B6E6A", perc_ass_to_orf = "#C2A83E"),
+    labels = c(perc_map = "% mapped", perc_ass_to_orf = "% mapped to ORF")
+  ) +
+  scale_color_manual(
+    values = c(perc_map = "#1B6E6A", perc_ass_to_orf = "#C2A83E"),
+    labels = c(perc_map = "% mapped", perc_ass_to_orf = "% mapped to ORF")
+  ) +
+  # white separators between bars (mimicking your reference plot)
+  geom_vline(
+    xintercept = seq(1.5, length(unique(counts.tax$sample)) + 0.5, 1),
+    colour = "white", linewidth = 2
+  ) +
+  scale_y_continuous(limits = c(0, 95), breaks = seq(0, 95, 15)) +
+  labs(
+    x = '',
+    y = 'Mapped reads (%)',
+    title = 'Mapping rate based of the two pipelines'
+  ) +
+  facet_wrap(~method)
+
+```
+
+## Taxonomy comparison
+
+```{r taxonomy comparison}
+#| fig-height: 5
+#| fig-width: 15
+top.metat.family <- counts.tax %>%
+  filter(method == 'metatdenovo',
+         !is.na(family)) %>%
+  group_by(family, sample) %>%
+  summarise( sum_tpm = sum(tpm), .groups = 'drop') %>%
+  group_by(family) %>%
+  summarise( avg_tpm = mean(sum_tpm)) %>%
+  slice_max(avg_tpm, n = 10) %>%
+  distinct(family) %>%
+  pull(family)
+
+top.magmap.family <- counts.tax %>%
+  filter(method == 'magmap') %>%
+  group_by(family, sample) %>%
+  summarise( sum_tpm = sum(tpm), .groups = 'drop') %>%
+  group_by(family) %>%
+  summarise( avg_tpm = mean(sum_tpm)) %>%
+  slice_max(avg_tpm, n = 10) %>%
+  distinct(family) %>%
+  pull(family)
+
+top.family <- union(top.metat.family, top.magmap.family)
+
+p3 <- counts.tax %>%
+  filter(family %in% top.family) %>%
+  group_by(method, family, sample) %>%
+  summarise(sum_tpm = sum(tpm), .groups = 'drop') %>%
+  ggplot(aes(x = sample, y = sum_tpm, fill = family)) +
+  scale_fill_manual(values = cb_palette) +
+  geom_col(position = "fill") +
+  facet_wrap(~method, nrow = 1) +
+  labs(
+    y = "Relative abundance",
+    x = "",
+    title = "Taxonomy distribution across dataset",
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.border       = element_rect(fill = NA, colour = "black", linewidth = 0.8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_line(colour = "grey90", linewidth = 0.6),
+
+    #–– X-axis label styling ––
+    axis.text.x        = element_text(size = 10),
+    axis.text.y        = element_text(size = 10),
+    axis.title.x       = element_blank(),
+    axis.ticks.x       = element_blank(),
+    axis.line.x        = element_line(colour = "black", linewidth = 0.7),
+    axis.title.y = element_text(size = 10),
+    title = element_text(size = 14, face = "bold"),
+
+    # facet strips styled like your example
+    strip.background   = element_rect(fill = "white", colour = "black"),
+    strip.text         = element_text(size = 12),
+
+    legend.position    = "right"
+  ) +
+  # white separators between bars (mimicking your reference plot)
+  geom_vline(
+    xintercept = seq(1.5, length(unique(counts.tax$sample)) + 0.5, 1),
+    colour = "white", linewidth = 2
+  )
+
+
+# total ORFs per method
+totals <- counts.tax %>%
+  filter(count > 0) %>%
+  distinct(orf, method) %>%
+  count(method, name = "total_orfs")
+
+# ORFs per taxonomic level (excluding NA)
+by_level <- counts.tax %>%
+  filter(count > 0) %>%
+  distinct(orf, method, domain, phylum, class, order, family, genus, species) %>%
+  pivot_longer(
+    cols = c(domain, phylum, class, order, family, genus, species),
+    names_to = "tax_level",
+    values_to = "tax_value"
+  ) %>%
+  filter(!is.na(tax_value) & tax_value != "") %>%
+  group_by(method, tax_level) %>%
+  summarise(n_orfs = n_distinct(orf), .groups = "drop")
+
+# compute proportions
+
+
+p4 <- by_level %>%
+  left_join(totals, by = "method") %>%
+  mutate(prop = (n_orfs / total_orfs) * 100) %>%
+  ggplot(aes(
+    x = factor(
+      tax_level,
+      levels = c("domain", "phylum", "class", "order", "family", "genus", "species")
+    ),
+    y = prop,
+    fill = method
+  )) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  scale_x_discrete(labels = c(
+    "domain" = "Domain", "phylum" = "Phylum", "class" = "Class",
+    "order" = "Order", "family" = "Family", "genus" = "Genus", "species" = "Species"
+  )) +
+  labs(
+    y = "ORFs with Taxonomy annotation (%)" ,
+    x = "",
+    title = "Taxonomy resolution"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.y = element_text(size = 10),
+    title = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 9),
+    legend.position = "null",
+    #legend.position.inside = c(0.40, 0.30),
+    legend.background = element_rect(fill = "white", color = "black", linewidth = 0.3),
+    panel.grid.major.x = element_line(colour = "grey90"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+```
+
+## Functional comparison
+
+```{r cog-categories}
+top.metat.cog <- cog.counts %>%
+  filter(method == 'metatdenovo',
+         !is.na(cog_category),
+         !cog_category == '') %>%
+  group_by(cog_category, sample) %>%
+  summarise( sum_tpm = sum(tpm), .groups = 'drop') %>%
+  group_by(cog_category) %>%
+  summarise( avg_tpm = mean(sum_tpm)) %>%
+  slice_max(avg_tpm, n = 10) %>%
+  distinct(cog_category) %>%
+  pull(cog_category)
+
+top.magmap.cog <- cog.counts %>%
+  filter(method == 'magmap',
+         !is.na(cog_category),
+         !cog_category == '') %>%
+  group_by(cog_category, sample) %>%
+  summarise( sum_tpm = sum(tpm), .groups = 'drop') %>%
+  group_by(cog_category) %>%
+  summarise( avg_tpm = mean(sum_tpm)) %>%
+  slice_max(avg_tpm, n = 10) %>%
+  distinct(cog_category) %>%
+  pull(cog_category)
+
+top.cog <- union(top.metat.cog, top.magmap.cog)
+
+p5 <- cog.counts %>%
+  filter(cog_category %in% top.cog) %>%
+  group_by(method, cog_category, sample) %>%
+  summarise(sum_tpm = sum(tpm), .groups = 'drop') %>%
+  ggplot(aes(x = sample, y = sum_tpm, fill = cog_category)) +
+  scale_fill_manual(values = cb_palette) +
+  geom_col(position = "fill") +
+  facet_wrap(~method, nrow = 1) +
+  labs(
+    y = "Relative abundance",
+    x = "",
+    title = "Proportion of COG categories" ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.border       = element_rect(fill = NA, colour = "black", linewidth = 0.8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_line(colour = "grey90", linewidth = 0.6),
+
+    #–– X-axis label styling ––
+    axis.text.x        = element_text(size = 10),
+    axis.text.y        = element_text(size = 10),
+    axis.title.y = element_text(size = 10, face = "bold"),
+    title = element_text(size = 14, face = "bold"),
+    axis.title.x       = element_blank(),
+    axis.ticks.x       = element_blank(),
+    axis.line.x        = element_line(colour = "black", linewidth = 0.7),
+
+    # facet strips styled like your example
+    strip.background   = element_rect(fill = "white", colour = "black"),
+    strip.text         = element_text(size = 12),
+
+    legend.position    = "right"
+  ) +
+  # white separators between bars (mimicking your reference plot)
+  geom_vline(
+    xintercept = seq(1.5, length(unique(counts.tax$sample)) + 0.5, 1),
+    colour = "white", linewidth = 2
+  )
+```
+
+```{r orf-functional-annotated}
+# total ORFs per method
+totals <- counts.tax %>%
+  filter(count > 0) %>%
+  distinct(orf, method) %>%
+  count(method, name = "total_orfs")
+
+# ORFs per taxonomic level (excluding NA)
+by_level <- cog.counts %>%
+  filter(count > 0) %>%
+  distinct(orf, method, cog_category) %>%
+  filter(!is.na(cog_category) & cog_category != "",
+         cog_category != 'Func_unknown') %>%
+  group_by(method, cog_category) %>%
+  summarise(n_orfs = n_distinct(orf), .groups = "drop")
+
+# compute proportions
+
+
+p6 <- by_level %>%
+  left_join(totals, by = "method") %>%
+  mutate(prop = (n_orfs / total_orfs) * 100) %>%
+  mutate(cog_category = reorder(cog_category, -prop, FUN = mean)) %>%   # descending order
+  ggplot(aes(
+    x = cog_category,
+    y = prop,
+    fill = method
+  )) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+    axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 10),
+    axis.title.y = element_text(size = 10, face = "bold"),
+    title = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 13),
+    legend.position = "inside",
+    legend.position.inside = c(0.90, 0.50),
+    legend.background = element_rect(fill = "white", color = "black", linewidth = 0.3),
+    panel.grid.major.x = element_line(colour = "white"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    y = "ORFs with Functional annotation (%)" ,
+    x = "",
+    title = "COG categories annotation"
+  )
+```
+
+## Final figure
+
+```{r final-figure}
+#| fig-width: 15
+#| fig-height: 15
+#| warning: false
+final_plot <-
+  (p0 | p1) /                          # row 1
+  p2 /                                 # row 2
+  (p4 | p3) /                          # row 3
+  (p6 | p5) +                          # row 4
+  plot_layout(heights = c(1, 2, 1, 1)) # control heights
+
+final_plot + plot_annotation(tag_levels = 'A')
+```
